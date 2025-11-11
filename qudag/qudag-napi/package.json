@@ -4,6 +4,10 @@
   "description": "Native Node.js bindings for QuDAG quantum-resistant cryptography",
   "main": "index.js",
   "types": "index.d.ts",
+  "bin": {
+    "qudag": "./bin/qudag-cli.js",
+    "qudag-native": "./bin/qudag-cli.js"
+  },
   "napi": {
     "name": "qudag-native",
     "triples": {
@@ -48,6 +52,9 @@
     "type": "git",
     "url": "https://github.com/ruvnet/daa",
     "directory": "qudag/qudag-napi"
+  },
+  "dependencies": {
+    "commander": "^11.1.0"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0"

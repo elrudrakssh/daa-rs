@@ -501,6 +501,11 @@ async fn read_swarm_status(state: Arc<McpServerState>) -> Result<Vec<Content>> {
     let agents = state.agents.read().await;
     let messages = state.swarm_messages.read().await;
 
+    let mut agent_types_map = std::collections::HashMap::new();
+    for agent in agents.values() {
+        *agent_types_map.entry(&agent.agent_type).or_insert(0) += 1;
+    }
+
     let swarm_status = json!({
         "total_agents": agents.len(),
         "active_agents": agents.values().filter(|a| matches!(a.status, crate::AgentStatus::Running)).count(),
@@ -510,13 +515,7 @@ async fn read_swarm_status(state: Arc<McpServerState>) -> Result<Vec<Content>> {
         "recent_messages": messages.iter()
             .filter(|m| chrono::Utc::now().signed_duration_since(m.timestamp) < chrono::Duration::hours(1))
             .count(),
-        "agent_types": {
-            let mut types = std::collections::HashMap::new();
-            for agent in agents.values() {
-                *types.entry(&agent.agent_type).or_insert(0) += 1;
-            }
-            types
-        },
+        "agent_types": agent_types_map,
         "timestamp": chrono::Utc::now()
     });
 
@@ -549,24 +548,25 @@ async fn read_swarm_messages(state: Arc<McpServerState>) -> Result<Vec<Content>>
 
 async fn read_swarm_topology(state: Arc<McpServerState>) -> Result<Vec<Content>> {
     let agents = state.agents.read().await;
-    
+
+    let nodes: Vec<_> = agents.values().map(|agent| json!({
+        "id": agent.id,
+        "name": agent.name,
+        "type": agent.agent_type,
+        "status": agent.status,
+        "endpoint": agent.endpoint,
+        "capabilities": agent.capabilities
+    })).collect();
+
+    let mut clusters_map = std::collections::HashMap::new();
+    for agent in agents.values() {
+        clusters_map.entry(&agent.agent_type).or_insert_with(Vec::new).push(&agent.id);
+    }
+
     let topology = json!({
-        "nodes": agents.values().map(|agent| json!({
-            "id": agent.id,
-            "name": agent.name,
-            "type": agent.agent_type,
-            "status": agent.status,
-            "endpoint": agent.endpoint,
-            "capabilities": agent.capabilities
-        })).collect::<Vec<_>>(),
+        "nodes": nodes,
         "connections": [],  // In a real implementation, this would show actual connections
-        "clusters": {
-            let mut clusters = std::collections::HashMap::new();
-            for agent in agents.values() {
-                clusters.entry(&agent.agent_type).or_insert_with(Vec::new).push(&agent.id);
-            }
-            clusters
-        },
+        "clusters": clusters_map,
         "timestamp": chrono::Utc::now()
     });
 
@@ -818,6 +818,11 @@ async fn read_usage_analytics(state: Arc<McpServerState>) -> Result<Vec<Content>
     let tasks = state.tasks.read().await;
     let messages = state.swarm_messages.read().await;
 
+    let mut utilization_map = std::collections::HashMap::new();
+    for agent in agents.values() {
+        *utilization_map.entry(&agent.agent_type).or_insert(0) += 1;
+    }
+
     let analytics = json!({
         "usage_summary": {
             "active_agents": agents.values().filter(|a| matches!(a.status, crate::AgentStatus::Running)).count(),
@@ -826,13 +831,7 @@ async fn read_usage_analytics(state: Arc<McpServerState>) -> Result<Vec<Content>
             "api_calls": 1000, // Mock value
             "data_transferred": "10.5 GB" // Mock value
         },
-        "agent_utilization": {
-            let mut utilization = std::collections::HashMap::new();
-            for agent in agents.values() {
-                *utilization.entry(&agent.agent_type).or_insert(0) += 1;
-            }
-            utilization
-        },
+        "agent_utilization": utilization_map,
         "peak_usage": {
             "peak_agents": agents.len(),
             "peak_tasks_per_hour": 100,
