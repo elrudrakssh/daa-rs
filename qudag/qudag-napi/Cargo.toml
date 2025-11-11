@@ -21,6 +21,8 @@ blake3 = "1.5"
 ml-kem = "0.2"
 ml-dsa = "0.1.0-rc.2"
 kem = "0.3.0-pre.0"
+pqcrypto-dilithium = "0.5"
+pqcrypto-traits = "0.3"
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }

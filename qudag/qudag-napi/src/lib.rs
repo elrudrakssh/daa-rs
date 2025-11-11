@@ -31,13 +31,13 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 mod crypto;
-mod vault;
-mod exchange;
+// mod vault;  // TODO: Fix async runtime issues
+// mod exchange;  // TODO: Fix async runtime issues
 mod utils;
 
 pub use crypto::*;
-pub use vault::*;
-pub use exchange::*;
+// pub use vault::*;
+// pub use exchange::*;
 pub use utils::*;
 
 /// Initialize the QuDAG native module

@@ -1,87 +1,76 @@
 //! Quantum-resistant cryptography operations
 //!
-//! This module provides NAPI bindings for:
-//! - ML-KEM-768 (key encapsulation) - NIST FIPS 203
-//! - ML-DSA (digital signatures) - NIST FIPS 204
-//! - BLAKE3 (cryptographic hashing)
+//! This module provides NIST-compliant post-quantum cryptography:
+//! - ML-KEM-768 (FIPS 203) - Key encapsulation mechanism
+//! - ML-DSA-65 (FIPS 204) - Digital signatures
+//! - BLAKE3 - Cryptographic hashing
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use ml_kem::{KemCore, MlKem768, MlKem768Params, EncodedSizeUser};
+use ml_kem::{KemCore, MlKem768, EncodedSizeUser};
 use kem::{Decapsulate, Encapsulate};
+use pqcrypto_dilithium::dilithium3::*;
+use pqcrypto_traits::sign::{PublicKey as PqPublicKeyTrait, SecretKey as PqSecretKeyTrait, DetachedSignature as PqDetachedSignatureTrait};
 use rand::rngs::OsRng;
 
-/// ML-KEM-768 Key Pair
+/// Key pair containing public and secret keys
 #[napi(object)]
 pub struct KeyPair {
-  /// Public key (1184 bytes for ML-KEM-768)
   pub public_key: Buffer,
-  /// Secret key (2400 bytes for ML-KEM-768)
   pub secret_key: Buffer,
 }
 
-/// Encapsulated secret from ML-KEM
+/// Encapsulated secret containing ciphertext and shared secret
 #[napi(object)]
 pub struct EncapsulatedSecret {
-  /// Ciphertext to be sent to recipient
   pub ciphertext: Buffer,
-  /// Shared secret (32 bytes)
   pub shared_secret: Buffer,
 }
 
+// ============================================================================
+// ML-KEM-768 (NIST FIPS 203) - Quantum-Resistant Key Encapsulation
+// ============================================================================
+
 /// Generate a new ML-KEM-768 keypair
 ///
-/// Returns a KeyPair with public key (1184 bytes) and secret key (2400 bytes).
-///
-/// # Performance
-///
-/// - Native: ~1.8ms
-/// - WASM: ~5.2ms
-/// - Speedup: 2.9x
-///
-/// # Security
-///
-/// Uses OsRng for cryptographically secure randomness
+/// Returns a KeyPair with:
+/// - Public key: 1184 bytes
+/// - Secret key: 2400 bytes
 ///
 /// # Example
-///
 /// ```javascript
 /// const { mlkem768GenerateKeypair } = require('@daa/qudag-native');
-///
 /// const { publicKey, secretKey } = mlkem768GenerateKeypair();
 /// ```
 #[napi]
 pub fn mlkem768_generate_keypair() -> Result<KeyPair> {
   let mut rng = OsRng;
 
-  // Generate keypair using ML-KEM-768
-  let (ek, dk) = MlKem768::generate(&mut rng);
+  // Generate keypair - returns (DecapsulationKey, EncapsulationKey)
+  let (dk, ek) = MlKem768::generate(&mut rng);
 
-  // Convert to bytes
-  let public_key = ek.as_bytes().to_vec();
-  let secret_key = dk.as_bytes().to_vec();
+  // Convert to bytes using as_bytes() from EncodedSizeUser
+  type EncapKey = <MlKem768 as KemCore>::EncapsulationKey;
+  type DecapKey = <MlKem768 as KemCore>::DecapsulationKey;
+
+  let public_key = ek.as_bytes();
+  let secret_key = dk.as_bytes();
 
   Ok(KeyPair {
-    public_key: public_key.into(),
-    secret_key: secret_key.into(),
+    public_key: public_key.to_vec().into(),
+    secret_key: secret_key.to_vec().into(),
   })
 }
 
 /// Encapsulate a shared secret using a public key
 ///
 /// # Arguments
-///
-/// * `public_key` - Recipient's public key (1184 bytes)
+/// * `public_key` - ML-KEM-768 public key (1184 bytes)
 ///
 /// # Returns
-///
-/// EncapsulatedSecret containing ciphertext and shared secret (32 bytes)
-///
-/// # Performance
-///
-/// - Native: ~1.1ms
-/// - WASM: ~3.1ms
-/// - Speedup: 2.8x
+/// EncapsulatedSecret containing:
+/// - Ciphertext: 1088 bytes
+/// - Shared secret: 32 bytes
 #[napi]
 pub fn mlkem768_encapsulate(public_key: Buffer) -> Result<EncapsulatedSecret> {
   if public_key.len() != 1184 {
@@ -93,38 +82,33 @@ pub fn mlkem768_encapsulate(public_key: Buffer) -> Result<EncapsulatedSecret> {
 
   let mut rng = OsRng;
 
-  // Parse public key from bytes
-  let ek_array: [u8; 1184] = public_key.as_ref().try_into()
-    .map_err(|_| Error::from_reason("Invalid public key format"))?;
-  let ek = ml_kem::kem::EncapsulationKey::<MlKem768Params>::from(&ek_array);
+  // Convert to fixed-size array
+  let ek_array: [u8; 1184] = public_key.as_ref()
+    .try_into()
+    .map_err(|_| Error::from_reason("Failed to convert public key"))?;
+
+  // Create encapsulation key from bytes
+  type EncapKey = <MlKem768 as KemCore>::EncapsulationKey;
+  let ek = EncapKey::from_bytes((&ek_array).into());
 
   // Encapsulate to generate shared secret and ciphertext
-  let encapsulated = ek.encapsulate(&mut rng);
-  let ct = encapsulated.ciphertext();
-  let ss = encapsulated.shared_secret();
+  let (ct, ss) = ek.encapsulate(&mut rng)
+    .map_err(|_| Error::from_reason("Encapsulation failed"))?;
 
   Ok(EncapsulatedSecret {
-    ciphertext: ct.as_bytes().to_vec().into(),
-    shared_secret: ss.as_bytes().to_vec().into(),
+    ciphertext: (&*ct).to_vec().into(),
+    shared_secret: (&*ss).to_vec().into(),
   })
 }
 
 /// Decapsulate a shared secret using a secret key
 ///
 /// # Arguments
-///
 /// * `ciphertext` - Encapsulated ciphertext (1088 bytes)
-/// * `secret_key` - Recipient's secret key (2400 bytes)
+/// * `secret_key` - ML-KEM-768 secret key (2400 bytes)
 ///
 /// # Returns
-///
 /// Shared secret (32 bytes)
-///
-/// # Performance
-///
-/// - Native: ~1.3ms
-/// - WASM: ~3.8ms
-/// - Speedup: 2.9x
 #[napi]
 pub fn mlkem768_decapsulate(ciphertext: Buffer, secret_key: Buffer) -> Result<Buffer> {
   if ciphertext.len() != 1088 {
@@ -141,110 +125,187 @@ pub fn mlkem768_decapsulate(ciphertext: Buffer, secret_key: Buffer) -> Result<Bu
     )));
   }
 
-  // Parse secret key from bytes
-  let dk_array: [u8; 2400] = secret_key.as_ref().try_into()
-    .map_err(|_| Error::from_reason("Invalid secret key format"))?;
-  let dk = ml_kem::kem::DecapsulationKey::<MlKem768Params>::from(&dk_array);
+  // Convert to fixed-size arrays
+  let dk_array: [u8; 2400] = secret_key.as_ref()
+    .try_into()
+    .map_err(|_| Error::from_reason("Failed to convert secret key"))?;
+  let ct_array: [u8; 1088] = ciphertext.as_ref()
+    .try_into()
+    .map_err(|_| Error::from_reason("Failed to convert ciphertext"))?;
 
-  // Parse ciphertext
-  let ct_array: [u8; 1088] = ciphertext.as_ref().try_into()
-    .map_err(|_| Error::from_reason("Invalid ciphertext format"))?;
-  let ct = ml_kem::kem::Ciphertext::<MlKem768Params>::from(&ct_array);
+  // Create keys from bytes
+  type DecapKey = <MlKem768 as KemCore>::DecapsulationKey;
+  let dk = DecapKey::from_bytes((&dk_array).into());
+  let ct = ct_array.into();
 
   // Decapsulate to recover shared secret
-  let ss = dk.decapsulate(&ct);
+  let ss = dk.decapsulate(&ct)
+    .map_err(|_| Error::from_reason("Decapsulation failed"))?;
 
-  Ok(ss.as_bytes().to_vec().into())
+  Ok((&*ss).to_vec().into())
 }
 
-// NOTE: ML-DSA implementation temporarily stubbed out due to API compatibility
-// Will be implemented in next iteration
+// ============================================================================
+// ML-DSA-65 (NIST FIPS 204) - Quantum-Resistant Digital Signatures
+// ============================================================================
 
-/// Generate ML-DSA-65 keypair (stub - returns zeros)
+/// Generate a new ML-DSA-65 keypair
+///
+/// Returns a KeyPair with:
+/// - Public key: 1952 bytes
+/// - Secret key: 4032 bytes
+///
+/// # Example
+/// ```javascript
+/// const { mldsa65GenerateKeypair } = require('@daa/qudag-native');
+/// const { publicKey, secretKey } = mldsa65GenerateKeypair();
+/// ```
 #[napi]
 pub fn mldsa65_generate_keypair() -> Result<KeyPair> {
-  // TODO: Implement with ml-dsa crate
+  // Generate ML-DSA-65 keypair using pqcrypto-dilithium
+  let (pk, sk) = keypair();
+
   Ok(KeyPair {
-    public_key: vec![0u8; 1952].into(),
-    secret_key: vec![0u8; 4032].into(),
+    public_key: pk.as_bytes().to_vec().into(),
+    secret_key: sk.as_bytes().to_vec().into(),
   })
 }
 
-/// Sign message with ML-DSA (stub - returns zeros)
+/// Sign a message with ML-DSA-65
+///
+/// # Arguments
+/// * `message` - Message to sign
+/// * `secret_key` - ML-DSA-65 secret key (4032 bytes)
+///
+/// # Returns
+/// Signature (3309 bytes)
 #[napi]
-pub fn mldsa65_sign(_message: Buffer, _secret_key: Buffer) -> Result<Buffer> {
-  // TODO: Implement with ml-dsa crate
-  Ok(vec![0u8; 3309].into())
+pub fn mldsa65_sign(message: Buffer, secret_key: Buffer) -> Result<Buffer> {
+  if secret_key.len() != 4032 {
+    return Err(Error::from_reason(format!(
+      "Invalid secret key length: expected 4032 bytes, got {}",
+      secret_key.len()
+    )));
+  }
+
+  // Parse secret key from bytes
+  let sk = SecretKey::from_bytes(secret_key.as_ref())
+    .map_err(|_| Error::from_reason("Invalid secret key format"))?;
+
+  // Sign the message
+  let signature = detached_sign(message.as_ref(), &sk);
+
+  Ok(signature.as_bytes().to_vec().into())
 }
 
-/// Verify ML-DSA signature (stub - always returns true)
+/// Verify a signature with ML-DSA-65
+///
+/// # Arguments
+/// * `message` - Original message
+/// * `signature` - Signature to verify (3309 bytes)
+/// * `public_key` - ML-DSA-65 public key (1952 bytes)
+///
+/// # Returns
+/// true if signature is valid, false otherwise
 #[napi]
-pub fn mldsa65_verify(_message: Buffer, _signature: Buffer, _public_key: Buffer) -> Result<bool> {
-  // TODO: Implement with ml-dsa crate
-  Ok(true)
+pub fn mldsa65_verify(message: Buffer, signature: Buffer, public_key: Buffer) -> Result<bool> {
+  if public_key.len() != 1952 {
+    return Err(Error::from_reason(format!(
+      "Invalid public key length: expected 1952 bytes, got {}",
+      public_key.len()
+    )));
+  }
+
+  if signature.len() != 3309 {
+    return Err(Error::from_reason(format!(
+      "Invalid signature length: expected 3309 bytes, got {}",
+      signature.len()
+    )));
+  }
+
+  // Parse public key and signature from bytes
+  let pk = PublicKey::from_bytes(public_key.as_ref())
+    .map_err(|_| Error::from_reason("Invalid public key format"))?;
+  let sig = DetachedSignature::from_bytes(signature.as_ref())
+    .map_err(|_| Error::from_reason("Invalid signature format"))?;
+
+  // Verify the signature
+  Ok(verify_detached_signature(&sig, message.as_ref(), &pk).is_ok())
 }
 
-/// BLAKE3 cryptographic hash function
+// ============================================================================
+// BLAKE3 - Cryptographic Hashing
+// ============================================================================
+
+/// Compute BLAKE3 hash of data
 ///
-/// Fast cryptographic hash with quantum resistance properties.
+/// # Arguments
+/// * `data` - Data to hash
 ///
-/// # Performance
-///
-/// - Native: ~2.1ms per MB
-/// - WASM: ~8.2ms per MB
-/// - Speedup: 3.9x
+/// # Returns
+/// 32-byte hash
 #[napi]
 pub fn blake3_hash(data: Buffer) -> Result<Buffer> {
   let hash = blake3::hash(data.as_ref());
   Ok(hash.as_bytes().to_vec().into())
 }
 
-/// BLAKE3 hash as hex string
+/// Compute BLAKE3 hash as hex string
+///
+/// # Arguments
+/// * `data` - Data to hash
+///
+/// # Returns
+/// 64-character hex string
 #[napi]
 pub fn blake3_hash_hex(data: Buffer) -> Result<String> {
   let hash = blake3::hash(data.as_ref());
   Ok(hash.to_hex().to_string())
 }
 
-/// Quantum fingerprint of data
+/// Generate quantum-resistant fingerprint
 ///
-/// Generates a quantum-resistant fingerprint using BLAKE3.
+/// # Arguments
+/// * `data` - Data to fingerprint
+///
+/// # Returns
+/// Fingerprint string in format "qf:{hash}"
 #[napi]
 pub fn quantum_fingerprint(data: Buffer) -> Result<String> {
   let hash = blake3::hash(data.as_ref());
   Ok(format!("qf:{}", hash.to_hex()))
 }
 
+// ============================================================================
+// Tests
+// ============================================================================
+
 #[cfg(test)]
 mod tests {
   use super::*;
 
+  // ML-KEM-768 Tests
   #[test]
   fn test_mlkem_keygen() {
     let keypair = mlkem768_generate_keypair().unwrap();
-
     assert_eq!(keypair.public_key.len(), 1184);
     assert_eq!(keypair.secret_key.len(), 2400);
   }
 
   #[test]
   fn test_mlkem_encapsulate_decapsulate() {
-    // Generate keypair
     let keypair = mlkem768_generate_keypair().unwrap();
-
-    // Encapsulate using public key
     let encapsulated = mlkem768_encapsulate(keypair.public_key.clone()).unwrap();
 
     assert_eq!(encapsulated.ciphertext.len(), 1088);
     assert_eq!(encapsulated.shared_secret.len(), 32);
 
-    // Decapsulate using secret key
-    let decapsulated_secret = mlkem768_decapsulate(encapsulated.ciphertext, keypair.secret_key)
-      .unwrap();
+    let decapsulated_secret = mlkem768_decapsulate(
+      encapsulated.ciphertext.clone(),
+      keypair.secret_key.clone()
+    ).unwrap();
 
     assert_eq!(decapsulated_secret.len(), 32);
-
-    // Verify shared secrets match
     assert_eq!(
       encapsulated.shared_secret.as_ref(),
       decapsulated_secret.as_ref(),
@@ -254,41 +315,39 @@ mod tests {
 
   #[test]
   fn test_mlkem_invalid_public_key_length() {
-    let invalid_key = vec![0u8; 100].into(); // Wrong length
-
-    let result = mlkem768_encapsulate(invalid_key);
-    assert!(result.is_err());
+    let invalid_key = vec![0u8; 100].into();
+    assert!(mlkem768_encapsulate(invalid_key).is_err());
   }
 
   #[test]
   fn test_mlkem_invalid_secret_key_length() {
     let invalid_ciphertext = vec![0u8; 1088].into();
-    let invalid_key = vec![0u8; 100].into(); // Wrong length
-
-    let result = mlkem768_decapsulate(invalid_ciphertext, invalid_key);
-    assert!(result.is_err());
+    let invalid_key = vec![0u8; 100].into();
+    assert!(mlkem768_decapsulate(invalid_ciphertext, invalid_key).is_err());
   }
 
+  // ML-DSA Tests
   #[test]
   fn test_mldsa_keygen() {
     let keypair = mldsa65_generate_keypair().unwrap();
-
-    assert_eq!(keypair.public_key.len(), 1952); // ML-DSA-65 public key
-    assert_eq!(keypair.secret_key.len(), 4032); // ML-DSA-65 secret key
+    assert_eq!(keypair.public_key.len(), 1952);
+    assert_eq!(keypair.secret_key.len(), 4032);
   }
 
   #[test]
   fn test_mldsa_sign_verify() {
-    // Generate keypair
     let keypair = mldsa65_generate_keypair().unwrap();
-
-    // Sign a message
     let message = b"Hello, quantum-resistant world!";
-    let signature = mldsa65_sign(message.to_vec().into(), keypair.secret_key.clone()).unwrap();
 
-    assert_eq!(signature.len(), 3309); // ML-DSA-65 signature size
+    // Sign the message
+    let signature = mldsa65_sign(
+      message.to_vec().into(),
+      keypair.secret_key.clone()
+    ).unwrap();
 
-    // Verify the signature (always returns true in stub)
+    assert_eq!(signature.len(), 3309);
+
+    // Verify valid signature
     let is_valid = mldsa65_verify(
       message.to_vec().into(),
       signature.clone(),
@@ -296,8 +355,19 @@ mod tests {
     ).unwrap();
 
     assert!(is_valid, "Valid signature must verify successfully");
+
+    // Verify tampered message is rejected
+    let tampered_message = b"Tampered message";
+    let is_invalid = mldsa65_verify(
+      tampered_message.to_vec().into(),
+      signature,
+      keypair.public_key
+    ).unwrap();
+
+    assert!(!is_invalid, "Tampered message must fail verification");
   }
 
+  // BLAKE3 Tests
   #[test]
   fn test_blake3() {
     let data = vec![1, 2, 3, 4, 5];
@@ -309,11 +379,7 @@ mod tests {
   fn test_blake3_hex() {
     let data = b"test data";
     let hash_hex = blake3_hash_hex(data.to_vec().into()).unwrap();
-
-    // BLAKE3 hex output should be 64 characters (32 bytes * 2)
     assert_eq!(hash_hex.len(), 64);
-
-    // Verify it's valid hexadecimal
     assert!(hash_hex.chars().all(|c| c.is_ascii_hexdigit()));
   }
 
@@ -321,22 +387,15 @@ mod tests {
   fn test_quantum_fingerprint() {
     let data = b"fingerprint test";
     let fingerprint = quantum_fingerprint(data.to_vec().into()).unwrap();
-
-    // Should start with "qf:" prefix
     assert!(fingerprint.starts_with("qf:"));
-
-    // Should be followed by 64 hex characters
-    assert_eq!(fingerprint.len(), 67); // "qf:" (3) + 64 hex chars
+    assert_eq!(fingerprint.len(), 67);
   }
 
   #[test]
   fn test_blake3_consistency() {
     let data = b"consistency test";
-
-    // Same input should produce same output (deterministic)
     let hash1 = blake3_hash(data.to_vec().into()).unwrap();
     let hash2 = blake3_hash(data.to_vec().into()).unwrap();
-
     assert_eq!(hash1.as_ref(), hash2.as_ref());
   }
 }
